@@ -1450,7 +1450,7 @@ body::before {
     <!-- Loading -->
     <div class="loading" id="loadingBox">
       <div class="spinner"></div>
-      <p id="loadingText">⚙️ بدء العملية على Apify...</p>
+      <p id="loadingText">⚙️ بدء العملية...</p>
       <div class="loading-progress">
         <div class="loading-progress-bar" id="loadingBar"></div>
       </div>
@@ -1514,7 +1514,7 @@ body::before {
 <!-- Footer -->
 <div class="footer">
   <div style="margin-bottom:6px">SocialTrack Pro · أداة تحليل احترافية</div>
-  <div style="font-size:10px;opacity:0.7">⚡ مبنية على Apify + Firebase + Meta Ad Library</div>
+  <div style="font-size:10px;opacity:0.7">⚡ مبنية على Apify + RapidAPI + Firebase + Meta Ad Library</div>
 </div>
 
 <!-- Settings Modal -->
@@ -1545,7 +1545,7 @@ body::before {
     <div class="card-sub" style="margin-top:16px">حول التطبيق</div>
     <div style="font-size:12px;line-height:1.7;color:var(--text-2)">
       <strong>SocialTrack Pro v2.0</strong><br>
-      أداة تحليل متقدمة لحسابات التواصل الاجتماعي. تجمع بيانات من Apify (سكرابينغ) و Meta Ad Library (إعلانات).<br>
+      أداة تحليل متقدمة لحسابات التواصل الاجتماعي. تجمع بيانات من Apify (سكرابينغ) و RapidAPI و Meta Ad Library (إعلانات).<br>
       <span style="color:var(--muted)">البيانات تُحفظ محلياً وفي Firebase. لا نجمع أي بيانات شخصية.</span>
     </div>
   </div>
@@ -1601,9 +1601,11 @@ const db = firebase.firestore();
 const COLLECTION = 'saved_pages';
 const META_TOKEN = 'EAAQPOSMuBZCcBRpEHu5DZAfylydBZAkJU7UiwLHzVVSmNcrzem5ZBLGeIvqyQkaY8LncpZCTVN24ZBMtIU0mf0zHdh9EPA6vZBn6y1ZArF77k6ZCF5Y9eASiZA3jj9kEaonKLq4BYJZBeERAoKgf1ZCFhSwfcSZAfJpZBDvmN3kwv83r5xZAD0enuJfo4ZAcBll3159HzsBUElKYEzQf3kz37P7CDki9LZBdSZBKw2W1ZBqXZBQa9hBHwSqBNLQnOpYBw3TqV7AMZAzp7Di0AEOexOa420b8GAJj0mri0WXS7noJxGy38twZDZD';
 
-let TOKEN = localStorage.getItem('apify_token') || '';
-let RAPID_KEY = localStorage.getItem('rapid_key') || '';
-let currentProvider = localStorage.getItem('api_provider') || 'apify';
+// Provider settings - completely independent
+let APIFY_TOKEN = localStorage.getItem('apify_token') || '';
+let RAPIDAPI_KEY = localStorage.getItem('rapid_key') || '';
+let currentProvider = localStorage.getItem('api_provider') || 'apify'; // 'apify' or 'rapidapi'
+
 let currentPlatform = 'instagram';
 let currentProfile = null;
 let currentResults = null;
@@ -1611,13 +1613,20 @@ let charts = {};
 let compareList = JSON.parse(localStorage.getItem('compare_list') || '[]');
 let currentProfileTags = [];
 let saveModalCallback = null;
-let displayedPostsCount = 12;
+
+// Infinite scroll variables
+let displayedPostsCount = 24;
+let isLoadingMore = false;
+let allPosts = [];
+let currentFilter = 'all';
+let currentFilteredPosts = [];
+let scrollObserver = null;
 
 // ==================== I18N ====================
 const i18n = {
   ar: {
     analyze: '🔎 تحليل الحساب',
-    analyzing: '⚙️ بدء العملية على Apify...',
+    analyzing: '⚙️ بدء العملية...',
     saved: 'محفوظ',
     followers: 'متابع',
     following: 'يتابع',
@@ -1626,7 +1635,7 @@ const i18n = {
   },
   en: {
     analyze: '🔎 Analyze Account',
-    analyzing: '⚙️ Starting on Apify...',
+    analyzing: '⚙️ Starting process...',
     saved: 'Saved',
     followers: 'Followers',
     following: 'Following',
@@ -1738,13 +1747,16 @@ function timeAgo(date) {
   return `قبل ${Math.floor(months/12)} سنة`;
 }
 
-// ==================== TOKEN MANAGEMENT ====================
+// ==================== PROVIDER MANAGEMENT ====================
 function checkToken() {
-  TOKEN = localStorage.getItem('apify_token') || '';
-  RAPID_KEY = localStorage.getItem('rapid_key') || '';
+  APIFY_TOKEN = localStorage.getItem('apify_token') || '';
+  RAPIDAPI_KEY = localStorage.getItem('rapid_key') || '';
   currentProvider = localStorage.getItem('api_provider') || 'apify';
-  const hasToken = (currentProvider === 'apify' && TOKEN) || (currentProvider === 'rapidapi' && RAPID_KEY);
-  if (!hasToken) {
+  
+  const hasApifyToken = APIFY_TOKEN && APIFY_TOKEN.length > 0;
+  const hasRapidKey = RAPIDAPI_KEY && RAPIDAPI_KEY.length > 0;
+  
+  if ((currentProvider === 'apify' && !hasApifyToken) || (currentProvider === 'rapidapi' && !hasRapidKey)) {
     selectSetupProvider(currentProvider);
     document.getElementById('tokenSetup').style.display = 'block';
     document.getElementById('searchBox').style.display = 'none';
@@ -1754,6 +1766,7 @@ function checkToken() {
     updateProviderBadge();
   }
 }
+
 function selectSetupProvider(p) {
   currentProvider = p;
   const isApify = p === 'apify';
@@ -1764,16 +1777,30 @@ function selectSetupProvider(p) {
   if (btnA) { btnA.style.background = isApify ? 'var(--gradient)' : 'var(--glass)'; btnA.style.color = isApify ? 'white' : 'var(--muted)'; btnA.style.border = isApify ? 'none' : '1px solid var(--border)'; }
   if (btnR) { btnR.style.background = isApify ? 'var(--glass)' : 'var(--gradient)'; btnR.style.color = isApify ? 'var(--muted)' : 'white'; btnR.style.border = isApify ? '1px solid var(--border)' : 'none'; }
 }
+
 function setActiveProvider(p) {
+  if (p === 'apify' && (!APIFY_TOKEN || APIFY_TOKEN.length === 0)) {
+    showToast('⚠️ يرجى إدخال Apify Token أولاً في الإعدادات', 'error');
+    return;
+  }
+  if (p === 'rapidapi' && (!RAPIDAPI_KEY || RAPIDAPI_KEY.length === 0)) {
+    showToast('⚠️ يرجى إدخال RapidAPI Key أولاً في الإعدادات', 'error');
+    return;
+  }
+  
   currentProvider = p;
   localStorage.setItem('api_provider', p);
+  
   const isApify = p === 'apify';
   const btnA = document.getElementById('settingsProviderApify');
   const btnR = document.getElementById('settingsProviderRapid');
   if (btnA) { btnA.style.background = isApify ? 'var(--gradient)' : 'var(--glass)'; btnA.style.color = isApify ? 'white' : 'var(--muted)'; btnA.style.border = isApify ? 'none' : '1px solid var(--border)'; }
   if (btnR) { btnR.style.background = isApify ? 'var(--glass)' : 'var(--gradient)'; btnR.style.color = isApify ? 'var(--muted)' : 'white'; btnR.style.border = isApify ? '1px solid var(--border)' : 'none'; }
+  
   updateProviderBadge();
+  showToast(`✅ تم التبديل إلى ${isApify ? 'Apify' : 'RapidAPI'}`, 'success');
 }
+
 function updateProviderBadge() {
   const badge = document.getElementById('providerBadge');
   if (!badge) return;
@@ -1782,45 +1809,48 @@ function updateProviderBadge() {
   badge.style.color = currentProvider === 'apify' ? 'var(--accent)' : 'var(--green)';
   badge.style.borderColor = currentProvider === 'apify' ? 'rgba(99,102,241,0.3)' : 'rgba(16,185,129,0.3)';
 }
+
 window.selectSetupProvider = selectSetupProvider;
 window.setActiveProvider = setActiveProvider;
 
 document.getElementById('saveTokenBtn').addEventListener('click', () => {
-  if (currentProvider === 'apify') {
-    const t = document.getElementById('tokenInput').value.trim();
-    if (!t.startsWith('apify_api_')) { showToast('⚠️ التوكن يجب أن يبدأ بـ apify_api_', 'error'); return; }
-    localStorage.setItem('apify_token', t);
-    TOKEN = t;
-  } else {
-    const k = document.getElementById('rapidInput').value.trim();
-    if (!k) { showToast('⚠️ أدخل مفتاح RapidAPI', 'error'); return; }
-    localStorage.setItem('rapid_key', k);
-    RAPID_KEY = k;
+  const apifyToken = document.getElementById('tokenInput').value.trim();
+  const rapidKey = document.getElementById('rapidInput').value.trim();
+  
+  if (apifyToken) {
+    localStorage.setItem('apify_token', apifyToken);
+    APIFY_TOKEN = apifyToken;
   }
+  if (rapidKey) {
+    localStorage.setItem('rapid_key', rapidKey);
+    RAPIDAPI_KEY = rapidKey;
+  }
+  
   localStorage.setItem('api_provider', currentProvider);
   checkToken();
-  showToast('✅ تم حفظ الإعداد بنجاح', 'success');
+  showToast('✅ تم حفظ الإعدادات بنجاح', 'success');
 });
-checkToken();
 
 // Settings
 document.getElementById('settingsBtn').addEventListener('click', () => {
-  document.getElementById('settingsToken').value = TOKEN;
+  document.getElementById('settingsToken').value = APIFY_TOKEN;
   const sr = document.getElementById('settingsRapid');
-  if (sr) sr.value = RAPID_KEY;
+  if (sr) sr.value = RAPIDAPI_KEY;
   setActiveProvider(currentProvider);
   document.getElementById('settingsModal').classList.add('show');
 });
+
 document.getElementById('updateTokenBtn').addEventListener('click', () => {
   const t = document.getElementById('settingsToken').value.trim();
   const k = document.getElementById('settingsRapid')?.value.trim();
-  if (t) { localStorage.setItem('apify_token', t); TOKEN = t; }
-  if (k) { localStorage.setItem('rapid_key', k); RAPID_KEY = k; }
+  if (t) { localStorage.setItem('apify_token', t); APIFY_TOKEN = t; }
+  if (k) { localStorage.setItem('rapid_key', k); RAPIDAPI_KEY = k; }
   localStorage.setItem('api_provider', currentProvider);
   showToast('✅ تم تحديث الإعدادات', 'success');
   document.getElementById('settingsModal').classList.remove('show');
   checkToken();
 });
+
 document.getElementById('exportData').addEventListener('click', () => {
   const data = {
     saved: JSON.parse(localStorage.getItem('saved_pages') || '[]'),
@@ -1835,6 +1865,7 @@ document.getElementById('exportData').addEventListener('click', () => {
   a.click();
   showToast('📤 تم تصدير البيانات', 'success');
 });
+
 document.getElementById('clearCache').addEventListener('click', () => {
   if (confirm('مسح كل البيانات المحلية؟ (لن يحذف Firebase)')) {
     localStorage.removeItem('saved_pages');
@@ -1887,6 +1918,7 @@ function addToHistory(handle, platform) {
   history = history.slice(0, 30);
   localStorage.setItem('search_history', JSON.stringify(history));
 }
+
 function renderHistory() {
   const history = JSON.parse(localStorage.getItem('search_history') || '[]');
   const list = document.getElementById('historyList');
@@ -1905,6 +1937,7 @@ function renderHistory() {
     </div>`;
   }).join('');
 }
+
 document.getElementById('clearHistory').addEventListener('click', () => {
   if (confirm('مسح كل سجل البحث؟')) {
     localStorage.removeItem('search_history');
@@ -1913,58 +1946,59 @@ document.getElementById('clearHistory').addEventListener('click', () => {
   }
 });
 
-// ==================== RAPID API ====================
+// ==================== RAPIDAPI SCRAPER (FAST - UP TO 1000 POSTS) ====================
 async function runRapidAPI(handle) {
   setLoading('⚡ جاري الجلب من RapidAPI...');
-  updateLoadingBar(15, '⚡ جلب بيانات الملف الشخصي...');
+  updateLoadingBar(10, '⚡ جلب بيانات الملف الشخصي...');
   addToHistory(handle, 'instagram');
+  
   try {
     const HOST = 'instagram-scraper-stable-api.p.rapidapi.com';
-    const baseUrl = `https://${HOST}`;
-    const hdrs = {
-      'X-RapidAPI-Key': RAPID_KEY,
-      'X-RapidAPI-Host': HOST,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    };
-    const igUrl = `https://www.instagram.com/${handle}/`;
-
-    // Helper: POST with form-data
-    const postForm = (endpoint, params) => {
-      const body = new URLSearchParams(params);
-      return fetch(`${baseUrl}/${endpoint}`, { method: 'POST', headers: hdrs, body });
+    const headers = { 
+      'X-RapidAPI-Key': RAPIDAPI_KEY, 
+      'X-RapidAPI-Host': HOST 
     };
 
-    // 1. Profile info
-    const profileRes = await postForm('get_ig_user_info_v2.php', { username_or_url: igUrl });
-    if (!profileRes.ok) throw new Error(`خطأ RapidAPI ${profileRes.status}: تأكد من المفتاح والاشتراك في API`);
+    // 1. Get profile info
+    const profileRes = await fetch(`https://${HOST}/v1/user-by-username?username=${encodeURIComponent(handle)}`, { headers });
+    if (!profileRes.ok) {
+      if (profileRes.status === 429) throw new Error('تم تجاوز حد الطلبات المجانية في RapidAPI. يرجى الانتظار أو التبديل إلى Apify.');
+      throw new Error(`خطأ RapidAPI ${profileRes.status}`);
+    }
     const profileData = await profileRes.json();
-    if (profileData.error) throw new Error('RapidAPI: ' + profileData.error);
-    const profile = profileData.data || profileData.user || profileData;
+    if (profileData.error || profileData.detail) throw new Error('RapidAPI: ' + (profileData.error || profileData.detail));
+    
+    const profile = profileData.data?.user || profileData.user || profileData.data || profileData;
 
-    updateLoadingBar(40, '⚡ جلب المنشورات...');
+    updateLoadingBar(30, '⚡ جلب المنشورات (قد يستغرق 30-60 ثانية)...');
 
-    // 2. Posts with pagination up to 1000
+    // 2. Get posts with pagination - can get up to 1000+ posts
     let allPosts = [];
-    let paginationToken = '';
+    let endCursor = null;
     let page = 0;
-    while (allPosts.length < 1000 && page < 25) {
-      const postsRes = await postForm('get_user_media_v2.php', {
-        username_or_url: igUrl,
-        amount: '50',
-        ...(paginationToken ? { pagination_token: paginationToken } : {})
-      });
+    const MAX_POSTS = 500; // Can be increased to 1000 if needed
+    
+    while (allPosts.length < MAX_POSTS && page < 20) {
+      let url = `https://${HOST}/v1/user-posts?username=${encodeURIComponent(handle)}&count=50`;
+      if (endCursor) url += `&end_cursor=${encodeURIComponent(endCursor)}`;
+      
+      const postsRes = await fetch(url, { headers });
       if (!postsRes.ok) break;
+      
       const postsData = await postsRes.json();
-      const items = postsData.data?.items || postsData.items || postsData.data || [];
-      if (!Array.isArray(items) || items.length === 0) break;
+      const items = postsData.data?.items || postsData.items || postsData.data?.user?.edge_owner_to_timeline_media?.edges?.map(e=>e.node) || [];
+      
+      if (items.length === 0) break;
+      
       allPosts = allPosts.concat(items);
-      paginationToken = postsData.pagination_token || postsData.data?.pagination_token || '';
-      if (!paginationToken) break;
+      endCursor = postsData.data?.end_cursor || postsData.end_cursor || postsData.data?.user?.edge_owner_to_timeline_media?.page_info?.end_cursor;
+      
+      if (!endCursor) break;
       page++;
-      updateLoadingBar(40 + Math.min(55, page * 3), `⚡ ${allPosts.length} منشور حتى الآن...`);
+      updateLoadingBar(30 + Math.min(60, page * 3), `⚡ تم جلب ${allPosts.length} منشور...`);
     }
 
-    updateLoadingBar(100, '✅ تم!');
+    updateLoadingBar(95, '✅ معالجة البيانات...');
     document.getElementById('loadingBox').classList.remove('show');
     document.getElementById('analyzeBtn').disabled = false;
 
@@ -1973,17 +2007,18 @@ async function runRapidAPI(handle) {
     currentProfile = normalized;
     savePage(normalized, handle);
     showResults(normalized, handle);
+    showToast(`✅ تم جلب ${allPosts.length} منشور من RapidAPI`, 'success');
+    
   } catch (err) {
-    showError(err.message || 'خطأ في RapidAPI');
+    showError(err.message || 'خطأ في RapidAPI. تأكد من المفتاح أو حاول استخدام Apify بدلاً من ذلك.');
   }
 }
 
 function normalizeRapidData(profile, posts, handle) {
-  // Support multiple API response shapes
-  const latestPosts = posts.map(p => {
-    // RockSolid / GraphQL edge format
+  const latestPosts = posts.map((p, idx) => {
     const isVideo = p.media_type === 2 || p.__typename === 'GraphVideo' || p.is_video;
     const isCarousel = p.media_type === 8 || p.__typename === 'GraphSidecar';
+    
     let displayUrl = p.display_url || p.thumbnail_url || '';
     if (!displayUrl && p.carousel_media?.[0]) {
       displayUrl = p.carousel_media[0].image_versions2?.candidates?.[0]?.url || p.carousel_media[0].display_url || '';
@@ -1994,12 +2029,14 @@ function normalizeRapidData(profile, posts, handle) {
     if (!displayUrl && p.thumbnail_resources?.length) {
       displayUrl = p.thumbnail_resources[p.thumbnail_resources.length - 1]?.src || '';
     }
+    
     const shortcode = p.code || p.shortcode || p.id || '';
     const likes = p.like_count || p.edge_media_preview_like?.count || p.edge_liked_by?.count || 0;
     const comments = p.comment_count || p.edge_media_to_comment?.count || 0;
     const views = p.play_count || p.view_count || p.video_view_count || 0;
     const caption = p.caption?.text || p.edge_media_to_caption?.edges?.[0]?.node?.text || p.accessibility_caption || '';
     const ts = p.taken_at ? new Date(p.taken_at * 1000).toISOString() : (p.timestamp ? new Date(p.timestamp * 1000).toISOString() : '');
+    
     return {
       url: `https://www.instagram.com/p/${shortcode}/`,
       displayUrl,
@@ -2013,6 +2050,7 @@ function normalizeRapidData(profile, posts, handle) {
       type: isVideo ? 'video' : isCarousel ? 'carousel' : 'photo',
     };
   });
+  
   return {
     platform: 'instagram',
     username: profile.username || handle,
@@ -2028,127 +2066,121 @@ function normalizeRapidData(profile, posts, handle) {
     latestPosts,
   };
 }
-window.runRapidAPI = runRapidAPI;
 
 // ==================== RUN SEARCH ====================
 async function runSearch() {
   const raw = document.getElementById('urlInput').value.trim();
   if (!raw) { showError('أدخل الرابط أو اسم الحساب'); return; }
 
-  // Detect platform if URL given
+  // Detect platform from URL
   let platform = currentPlatform;
   let handle = raw;
-  let igUrl = raw;
-
-  if (raw.includes('instagram.com')) platform = 'instagram';
-  else if (raw.includes('facebook.com')) platform = 'facebook';
-
-  // Build clean handle
+  
   if (raw.includes('instagram.com')) {
+    platform = 'instagram';
     const m = raw.match(/instagram\.com\/([A-Za-z0-9_.]+)/);
     handle = m ? m[1] : raw;
-    igUrl = `https://www.instagram.com/${handle}/`;
   } else if (raw.includes('facebook.com')) {
+    platform = 'facebook';
     const m = raw.match(/facebook\.com\/([A-Za-z0-9_.]+)/);
     handle = m ? m[1] : raw;
-    igUrl = `https://www.facebook.com/${handle}`;
   } else {
-    handle = raw.replace('@','').replace(/[^A-Za-z0-9_.]/g,'');
-    igUrl = `${platformConfig[platform].placeholder.split('/')[0]}//.../${handle}`;
+    handle = raw.replace('@', '').replace(/[^A-Za-z0-9_.]/g, '');
   }
-
-  if (platform === 'instagram' && !raw.includes('instagram.com') && !raw.startsWith('http')) {
-    igUrl = `https://www.instagram.com/${handle}/`;
-  }
-
+  
   currentPlatform = platform;
-  // Route to RapidAPI if active and platform is instagram
-  if (currentProvider === 'rapidapi' && platform === 'instagram') {
-    await runRapidAPI(handle);
+  
+  // Route based on selected provider
+  if (currentProvider === 'rapidapi') {
+    if (platform === 'instagram') {
+      await runRapidAPI(handle);
+      return;
+    } else {
+      showError('⚠️ RapidAPI يدعم Instagram فقط. يرجى التبديل إلى Apify لتحليل Facebook.');
+      return;
+    }
+  }
+  
+  // APIFY Provider
+  if (!APIFY_TOKEN) {
+    showError('يرجى إدخال Apify Token في الإعدادات أولاً');
     return;
   }
-
+  
   setLoading('⚙️ بدء العملية على Apify...');
   updateLoadingBar(10, '⚙️ إرسال الطلب لـ Apify...');
   addToHistory(handle, platform);
-
+  
   try {
     const actorId = platformConfig[platform].actor;
-
-    // 1. Start actor run
-    const actorBody = buildActorBody(platform, handle, igUrl);
-
+    const igUrl = `https://www.instagram.com/${handle}/`;
+    const fbUrl = `https://www.facebook.com/${handle}/`;
+    const url = platform === 'instagram' ? igUrl : fbUrl;
+    
+    let actorBody;
+    if (platform === 'instagram') {
+      actorBody = { directUrls: [url], resultsType: 'posts', resultsLimit: 500 };
+    } else {
+      actorBody = { startUrls: [{ url }], maxPostsPerPage: 200 };
+    }
+    
     const r1 = await fetch(
-      `https://api.apify.com/v2/acts/${actorId}/runs?token=${TOKEN}`,
+      `https://api.apify.com/v2/acts/${actorId}/runs?token=${APIFY_TOKEN}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(actorBody)
       }
     );
-
+    
     if (!r1.ok) {
       const e = await r1.json().catch(() => ({}));
       throw new Error(e?.error?.message || `خطأ HTTP: ${r1.status}`);
     }
-
+    
     const j1 = await r1.json();
     const runId = j1?.data?.id;
     const datasetId = j1?.data?.defaultDatasetId;
     if (!runId) throw new Error('لم يبدأ الـ run — تحقق من التوكن');
-
-    // 2. Poll status
+    
     let status = 'RUNNING', tries = 0;
     while (['RUNNING', 'READY', 'CREATED'].includes(status)) {
       await new Promise(r => setTimeout(r, 4000));
       tries++;
       if (tries > 75) throw new Error('انتهت المهلة، حاول مجدداً');
       updateLoadingBar(10 + Math.min(80, tries * 1.2), `⏳ جاري المعالجة... ${tries*4}ث`);
-      const r2 = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${TOKEN}`);
+      const r2 = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`);
       const j2 = await r2.json();
       status = j2?.data?.status;
     }
-
+    
     if (status !== 'SUCCEEDED') throw new Error('فشلت العملية: ' + status);
-
+    
     updateLoadingBar(95, '📦 جاري تحميل البيانات...');
-
-    // 3. Get data
-    const r3 = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${TOKEN}`);
+    
+    const r3 = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`);
     const items = await r3.json();
-
+    
     if (!items || items.length === 0) throw new Error('الحساب غير موجود أو خاص');
-
+    
     updateLoadingBar(100, '✅ تم!');
-
     document.getElementById('loadingBox').classList.remove('show');
     document.getElementById('analyzeBtn').disabled = false;
-
+    
     const normalized = normalizeData(items, handle, platform);
     currentResults = normalized;
     currentProfile = normalized;
     savePage(normalized, handle);
     showResults(normalized, handle);
-
+    
   } catch (err) {
     showError(err.message || 'خطأ غير متوقع');
   }
 }
 
-function buildActorBody(platform, handle, url) {
-  switch (platform) {
-    case 'instagram':
-      return { directUrls: [url], resultsType: 'details', resultsLimit: 1000 };
-    case 'facebook':
-      return { startUrls: [{ url }], maxPostsPerPage: 200 };
-    default:
-      return { directUrls: [url] };
-  }
-}
-
 function normalizeData(items, handle, platform) {
   if (platform === 'instagram') {
-    const d = items[0];
+    const d = items[0] || {};
     return {
       platform: 'instagram',
       username: d.username || handle,
@@ -2164,9 +2196,8 @@ function normalizeData(items, handle, platform) {
       latestPosts: d.latestPosts || d.posts || []
     };
   } else if (platform === 'facebook') {
-    // Facebook normalization
     const page = items[0] || {};
-    const posts = items.filter(i => i.postText || i.postMessage || i.postUrl).map(p => ({
+    const posts = items.filter(i => i.postText || i.postMessage || i.postUrl).slice(0, 500).map(p => ({
       url: p.postUrl || '',
       displayUrl: p.postImage || p.postPicture || '',
       likesCount: p.postReactions || p.reactions || 0,
@@ -2192,7 +2223,7 @@ function normalizeData(items, handle, platform) {
       latestPosts: posts
     };
   }
-  return { platform, username: handle, fullName: handle, posts: [] };
+  return { platform, username: handle, fullName: handle, latestPosts: [] };
 }
 
 // ==================== ANALYTICS FUNCTIONS ====================
@@ -2232,7 +2263,6 @@ function calcTrend(posts) {
 }
 
 function calcGrowth(posts, followers) {
-  // Estimate monthly growth based on post engagement
   if (posts.length < 10) return null;
   const oneMonthAgo = Date.now() - 30*24*60*60*1000;
   const recent = posts.filter(p => p.timestamp && new Date(p.timestamp).getTime() > oneMonthAgo);
@@ -2245,7 +2275,6 @@ function calcGrowth(posts, followers) {
 }
 
 function bestPostingTime(posts, profileFollowers = 0) {
-  // 7x24 heatmap — compute average engagement rate per post (engagement/followers)
   const heatmap = Array(7).fill(0).map(() => Array(24).fill(0));
   const count = Array(7).fill(0).map(() => Array(24).fill(0));
   const rateSum = Array(7).fill(0).map(() => Array(24).fill(0));
@@ -2257,12 +2286,10 @@ function bestPostingTime(posts, profileFollowers = 0) {
     const eng = (p.likesCount || 0) + (p.commentsCount || 0);
     heatmap[day][hour] += eng;
     count[day][hour]++;
-    // normalized rate: engagement per post divided by follower count (will normalize later)
     const followers = (p._ownerFollowers || p.followersAtPost || profileFollowers || 0);
     const rate = followers > 0 ? eng / followers : eng;
     rateSum[day][hour] += rate;
   });
-  // compute average rate per cell
   const avgRate = Array(7).fill(0).map(() => Array(24).fill(0));
   for (let d = 0; d < 7; d++) {
     for (let h = 0; h < 24; h++) {
@@ -2318,13 +2345,11 @@ function generateInsights(d, followers, posts, eng, trend, growth) {
     return insights;
   }
 
-  // Engagement quality
   if (eng > 5) insights.push({ icon: '🎯', text: `<strong>تفاعل ممتاز (${eng}%)</strong> — أعلى من المتوسط في إنستقرام (3%). خوارزمية المنصة ستدفع محتواك أكثر.` });
   else if (eng > 2) insights.push({ icon: '⚡', text: `<strong>تفاعل جيد (${eng}%)</strong> — ضمن المعدل الطبيعي. ركّز على المحتوى التفاعلي لزيادته.` });
   else if (eng > 0.5) insights.push({ icon: '📉', text: `<strong>تفاعل منخفض (${eng}%)</strong> — قد يكون الجمهور غير مستهدف أو المحتوى لا يلامس اهتماماتهم.` });
   else insights.push({ icon: '⚠️', text: `<strong>تفاعل ضعيف جداً</strong> — راجع جودة المحتوى وتوقيت النشر.` });
 
-  // Trend
   if (trend !== null) {
     if (trend > 20) insights.push({ icon: '📈', text: `<strong>اتجاه صاعد قوي (+${trend.toFixed(1)}%)</strong> — التفاعل في تحسّن مستمر! استمر بنفس الاستراتيجية.` });
     else if (trend > 0) insights.push({ icon: '🔼', text: `<strong>اتجاه إيجابي (+${trend.toFixed(1)}%)</strong> — أداء المنشورات الحديثة أفضل من السابقة.` });
@@ -2332,7 +2357,6 @@ function generateInsights(d, followers, posts, eng, trend, growth) {
     else if (trend < 0) insights.push({ icon: '🔽', text: `<strong>تراجع طفيف (${trend.toFixed(1)}%)</strong> — قد يحتاج تنويع في المحتوى.` });
   }
 
-  // Content type
   const types = analyzeContentTypes(posts);
   const maxType = Object.entries(types).sort((a,b) => b[1].avgEng - a[1].avgEng)[0];
   if (maxType && maxType[1].avgEng > 0) {
@@ -2340,7 +2364,6 @@ function generateInsights(d, followers, posts, eng, trend, growth) {
     insights.push({ icon: '🎬', text: `<strong>${typeName}</strong> يحقق أعلى تفاعل (${fmt(maxType[1].avgEng)} متوسط). زوّد من هذا النوع.` });
   }
 
-  // Posting frequency
   if (totalPosts > 0 && posts[0].timestamp && posts[totalPosts-1].timestamp) {
     const days = (new Date(posts[0].timestamp) - new Date(posts[totalPosts-1].timestamp)) / (1000*60*60*24);
     if (days > 0) {
@@ -2350,16 +2373,146 @@ function generateInsights(d, followers, posts, eng, trend, growth) {
     }
   }
 
-  // Hidden likes
   const hidden = posts.filter(p => p.likesCount === -1).length;
   if (hidden > totalPosts * 0.5) insights.push({ icon: '🔒', text: `<strong>إعجابات مخفية</strong> في ${hidden} منشور — قد يكون الحساب يخفيها لزيادة التفاعل الحقيقي.` });
 
   return insights.slice(0, 6);
 }
 
+// ==================== INFINITE SCROLL FUNCTIONS ====================
+function setupInfiniteScroll(posts, followers) {
+  allPosts = posts;
+  currentFilteredPosts = applyFilter(allPosts, currentFilter);
+  displayedPostsCount = 24;
+  renderPostsGrid(currentFilteredPosts, followers);
+  
+  if (scrollObserver) scrollObserver.disconnect();
+  
+  let sentinel = document.getElementById('scroll-sentinel');
+  if (!sentinel) {
+    sentinel = document.createElement('div');
+    sentinel.id = 'scroll-sentinel';
+    sentinel.style.height = '20px';
+    sentinel.style.margin = '10px 0';
+    sentinel.style.textAlign = 'center';
+    sentinel.innerHTML = '<div style="padding: 10px; color: var(--muted); font-size: 12px;">⬇️ قم بالتمرير للمزيد ⬇️</div>';
+    const postsGrid = document.getElementById('postsGrid');
+    if (postsGrid && postsGrid.parentNode) {
+      postsGrid.parentNode.insertBefore(sentinel, postsGrid.nextSibling);
+    }
+  }
+  
+  scrollObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting && !isLoadingMore && currentFilteredPosts.length > displayedPostsCount) {
+        loadMorePosts(followers);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px 100px 0px' });
+  
+  scrollObserver.observe(sentinel);
+}
+
+function applyFilter(posts, filter) {
+  switch(filter) {
+    case 'video': return posts.filter(p => p.videoViewCount > 0 || p.type === 'video');
+    case 'photo': return posts.filter(p => !p.videoViewCount && p.type !== 'video' && p.type !== 'carousel');
+    case 'carousel': return posts.filter(p => p.type === 'carousel' || p.type === 'sidecar');
+    case 'top': return [...posts].sort((a,b) => ((b.likesCount||0)+(b.commentsCount||0)) - ((a.likesCount||0)+(a.commentsCount||0)));
+    default: return posts;
+  }
+}
+
+function renderPostsGrid(posts, followers, append = false) {
+  const grid = document.getElementById('postsGrid');
+  if (!grid) return;
+  
+  const postsToShow = posts.slice(0, displayedPostsCount);
+  const html = postsToShow.map((p, i) => postCard(p, null, followers, i+1)).join('');
+  
+  if (append) {
+    grid.insertAdjacentHTML('beforeend', html);
+  } else {
+    grid.innerHTML = html;
+  }
+  
+  const sentinel = document.getElementById('scroll-sentinel');
+  if (sentinel) {
+    if (displayedPostsCount >= posts.length) {
+      sentinel.innerHTML = '<div style="padding: 10px; color: var(--muted); font-size: 12px;">✨ تم عرض جميع المنشورات ✨</div>';
+      sentinel.style.opacity = '0.5';
+    } else {
+      sentinel.innerHTML = '<div style="padding: 10px; color: var(--muted); font-size: 12px;">⬇️ قم بالتمرير للمزيد ⬇️</div>';
+      sentinel.style.opacity = '1';
+    }
+  }
+}
+
+async function loadMorePosts(followers) {
+  if (isLoadingMore) return;
+  if (displayedPostsCount >= currentFilteredPosts.length) return;
+  
+  isLoadingMore = true;
+  
+  const sentinel = document.getElementById('scroll-sentinel');
+  if (sentinel) {
+    sentinel.innerHTML = '<div style="padding: 10px;"><div class="spinner" style="width:24px;height:24px;margin:0 auto 5px"></div><div style="font-size:11px;color:var(--muted)">جاري تحميل المزيد...</div></div>';
+  }
+  
+  await new Promise(resolve => setTimeout(resolve, 300));
+  
+  displayedPostsCount = Math.min(displayedPostsCount + 24, currentFilteredPosts.length);
+  renderPostsGrid(currentFilteredPosts, followers, false);
+  
+  isLoadingMore = false;
+}
+
+function changeFilter(filter, posts, followers) {
+  currentFilter = filter;
+  currentFilteredPosts = applyFilter(posts, filter);
+  displayedPostsCount = 24;
+  renderPostsGrid(currentFilteredPosts, followers, false);
+  
+  const sentinel = document.getElementById('scroll-sentinel');
+  if (sentinel) {
+    sentinel.innerHTML = '<div style="padding: 10px; color: var(--muted); font-size: 12px;">⬇️ قم بالتمرير للمزيد ⬇️</div>';
+  }
+}
+
+function initPostFiltersWithInfinite(posts, followers) {
+  const filterChips = document.querySelectorAll('.filter-chip');
+  filterChips.forEach(chip => {
+    chip.removeEventListener('click', handleFilterClick);
+    chip.addEventListener('click', handleFilterClick);
+  });
+  
+  function handleFilterClick(e) {
+    const chip = e.currentTarget;
+    filterChips.forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    const filterValue = chip.dataset.filter;
+    changeFilter(filterValue, posts, followers);
+  }
+}
+
+function resetInfiniteScroll() {
+  if (scrollObserver) {
+    scrollObserver.disconnect();
+    scrollObserver = null;
+  }
+  const sentinel = document.getElementById('scroll-sentinel');
+  if (sentinel) sentinel.remove();
+  displayedPostsCount = 24;
+  isLoadingMore = false;
+  allPosts = [];
+  currentFilteredPosts = [];
+  currentFilter = 'all';
+}
+
 // ==================== RENDER RESULTS ====================
 function showResults(d, handle) {
-  displayedPostsCount = 12;
+  resetInfiniteScroll();
+  
   const followers = d.followersCount || d.followedByCount || 0;
   const following = d.followsCount || d.followingCount || 0;
   const posts = d.latestPosts || d.posts || [];
@@ -2386,18 +2539,12 @@ function showResults(d, handle) {
   const engLabel = eng > 5 ? '🔥 ممتاز' : eng > 2 ? '⚡ جيد' : '📉 ضعيف';
   const insights = generateInsights(d, followers, posts, eng, trend, growth);
   const platformIcon = { instagram: '📷', facebook: '👍' }[d.platform] || '📷';
-
-  // Heatmap data
   const heatmapData = bestPostingTime(posts, followers);
   const bestSlot = findBestSlot(heatmapData);
-
-  // In compare list?
   const inCompare = compareList.some(c => c.handle === d.username);
 
   document.getElementById('resultsBox').innerHTML = `
     <div class="fade-up">
-
-      <!-- Profile Hero -->
       <div class="profile-hero">
         <div class="profile-hero-content">
           ${d.profilePicUrl ? `<img class="avatar-large" src="${proxyImg(d.profilePicUrl)}" onerror="this.src='';this.style.background='rgba(255,255,255,0.2)'">` : '<div class="avatar-large" style="display:flex;align-items:center;justify-content:center;font-size:32px">👤</div>'}
@@ -2410,7 +2557,6 @@ function showResults(d, handle) {
             ${d.biography ? `<div class="profile-bio">${d.biography.replace(/\n/g, '<br>')}</div>` : ''}
             <div class="profile-meta">
               ${d.platform === 'instagram' ? '<span class="profile-meta-item">📷 Instagram</span>' : ''}
-              
               ${d.platform === 'facebook' ? '<span class="profile-meta-item">👍 Facebook</span>' : ''}
               ${d.isPrivate ? '<span class="profile-meta-item">🔒 خاص</span>' : '<span class="profile-meta-item">🌍 عام</span>'}
               ${d.externalUrl ? `<span class="profile-meta-item">🔗 <a href="${d.externalUrl}" target="_blank" style="color:inherit">${d.externalUrl.replace(/^https?:\/\//, '')}</a></span>` : ''}
@@ -2424,7 +2570,6 @@ function showResults(d, handle) {
         </div>
       </div>
 
-      <!-- Stats Grid -->
       <div class="stats-grid stagger">
         <div class="stat-card">
           <div class="stat-icon">👥</div>
@@ -2460,7 +2605,6 @@ function showResults(d, handle) {
         </div>` : ''}
       </div>
 
-      <!-- Engagement Card -->
       <div class="section-title">💡 تحليل التفاعل</div>
       <div class="engagement-card">
         <div class="engagement-main">
@@ -2503,7 +2647,6 @@ function showResults(d, handle) {
         </div>
       </div>
 
-      <!-- AI Insights -->
       ${insights.length > 0 ? `
         <div class="ai-insights">
           <div class="ai-insights-title">🤖 رؤى ذكية</div>
@@ -2511,7 +2654,6 @@ function showResults(d, handle) {
         </div>
       ` : ''}
 
-      <!-- Advanced Stats -->
       <div class="section-title">📅 تحليل سنة كاملة <span class="badge">${yearPosts.length} منشور</span></div>
       <div class="adv-grid">
         <div class="adv-card">
@@ -2542,7 +2684,6 @@ function showResults(d, handle) {
         </div>
       </div>
 
-      <!-- Engagement Trend Chart -->
       <div class="section-title">📊 منحنى التفاعل</div>
       <div class="chart-container">
         <div class="chart-tabs">
@@ -2554,7 +2695,6 @@ function showResults(d, handle) {
         <canvas id="trendChart"></canvas>
       </div>
 
-      <!-- Content Type Analysis -->
       <div class="section-title">🎨 أنواع المحتوى</div>
       <div class="content-types">
         <div class="content-type">
@@ -2577,14 +2717,12 @@ function showResults(d, handle) {
         </div>
       </div>
 
-      <!-- Best Time Heatmap -->
       <div class="section-title">⏰ خريطة أوقات النشر</div>
       <div class="chart-container">
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">كلما كان اللون أغمق = تفاعل أعلى</div>
         <div class="heatmap" id="heatmap"></div>
       </div>
 
-      <!-- Top Hashtags -->
       ${hashtags.length > 0 ? `
         <div class="section-title">#️⃣ أكثر الهاشتاقات استخداماً</div>
         <div class="hashtag-cloud">
@@ -2596,7 +2734,6 @@ function showResults(d, handle) {
         </div>
       ` : ''}
 
-      <!-- Top Posts -->
       ${posts.length > 0 ? `
         <div class="section-title">🏆 أبرز المنشورات</div>
         <div class="highlight-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:16px">
@@ -2613,21 +2750,7 @@ function showResults(d, handle) {
           ${types.carousel.count > 0 ? `<button class="filter-chip" data-filter="carousel">كاروسيل (${types.carousel.count})</button>` : ''}
           <button class="filter-chip" data-filter="top">🔥 الأعلى تفاعلاً</button>
         </div>
-        <div class="posts-grid" id="postsGrid">
-          ${posts.slice(0, 12).map((p, i) => postCard(p, null, followers, i+1)).join('')}
-        </div>
-        ${posts.length > 12 ? `
-          <div style="text-align:center;margin-top:20px;padding:16px;background:rgba(99,102,241,0.08);border:2px solid var(--accent);border-radius:12px">
-            <button class="analyze-btn" style="width:100%;margin-bottom:8px" onclick="showMorePosts()" id="loadMoreBtn">📥 عرض المزيد (${posts.length - displayedPostsCount} متبقي)</button>
-            <div style="font-size:12px;color:var(--muted)">جاري عرض ${Math.min(12, posts.length)} من ${posts.length} منشور</div>
-          </div>
-        ` : ''}
-      ` : ''}
-
-      ${posts.length > 12 ? `
-        <button class="analyze-btn" style="width:100%;margin-bottom:10px;background:linear-gradient(135deg,var(--accent),var(--accent-2))" onclick="showAllRemainingPosts()" id="loadAllBtn">
-          📊 عرض جميع المنشورات <span style="font-size:12px;opacity:0.8">(${posts.length})</span>
-        </button>
+        <div class="posts-grid" id="postsGrid"></div>
       ` : ''}
 
       <button class="back-btn" style="width:100%;padding:12px;background:transparent;border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;margin-top:8px" onclick="resetSearch()">🔙 بحث جديد</button>
@@ -2642,126 +2765,16 @@ function showResults(d, handle) {
     </div>
   `;
 
-
-    // ---------------- Sample data helper (dev) ----------------
-    // Floating button to load a generated sample profile for visual testing
-    (() => {
-      const btn = document.createElement('button');
-      btn.id = 'sampleLoadBtn';
-      btn.textContent = 'عرض مثال الخريطة';
-      btn.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:9999;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:white;padding:10px 14px;border-radius:12px;border:none;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,0.25);font-weight:800';
-      document.body.appendChild(btn);
-
-      function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-      function makeTimestamp(daysAgo, hour) {
-        const d = new Date();
-        d.setDate(d.getDate() - daysAgo);
-        d.setHours(hour, 0, 0, 0);
-        return d.toISOString();
-      }
-
-      function generateSampleProfile() {
-        const followers = 25000;
-        const posts = [];
-        const captions = [
-          '🌟 لحظة جميلة مع الحبيبة',
-          '☀️ غروب شمس رائع اليوم',
-          '🎨 فن وإبداع',
-          '✨ كل يوم فرصة جديدة',
-          '💪 الحياة جميلة',
-          '🎵 موسيقى روحي',
-          '📸 لحظة عفوية',
-          '🌈 ألوان الحياة',
-          '🏆 نجاح وفخر',
-          '💝 حب وعطف',
-          '🌍 استكشاف العالم',
-          '🎯 تحقيق الأحلام',
-          '📱 تقنية وابتكار',
-          '🍕 طعام لذيذ',
-          '⛰️ طبيعة خلابة'
-        ];
-        
-        // Create 120 posts distributed across last 30 days with varied hours
-        for (let i = 0; i < 120; i++) {
-          const daysAgo = randomInt(0, 29);
-          const hour = randomInt(0, 23);
-          const likes = randomInt(100, 2500) + Math.round((30 - daysAgo) * 30);
-          const comments = Math.round(likes * (Math.random() * 0.08 + 0.03));
-          const rand = Math.random();
-          let type, videoViewCount = 0, sharesCount = 0;
-          
-          if (rand > 0.75) {
-            type = 'video';
-            videoViewCount = Math.round(likes * (Math.random() * 1.5 + 0.8));
-            sharesCount = Math.round(likes * 0.05);
-          } else if (rand > 0.85) {
-            type = 'carousel';
-            sharesCount = Math.round(likes * 0.04);
-          } else {
-            type = 'photo';
-            sharesCount = Math.round(likes * 0.02);
-          }
-          
-          const imgId = (i % 50) + 1;
-          const picsum = `https://picsum.photos/400/400?random=${i}`;
-          
-          posts.push({
-            url: `https://www.instagram.com/p/sample${i+1}`,
-            displayUrl: picsum,
-            likesCount: likes,
-            commentsCount: comments,
-            videoViewCount: videoViewCount,
-            sharesCount: sharesCount,
-            caption: captions[i % captions.length] + ` #تجربة #احترافي`,
-            timestamp: makeTimestamp(daysAgo, hour),
-            type: type,
-            videoPlayCount: videoViewCount
-          });
-        }
-        return {
-          platform: 'instagram',
-          username: 'sample_account',
-          fullName: 'حساب تجريبي احترافي',
-          biography: '📸 تصوير احترافي | 🎬 محتوى بصري | 💼 إستشارات',
-          profilePicUrl: 'https://picsum.photos/150/150?random=profile',
-          followersCount: followers,
-          postsCount: posts.length,
-          latestPosts: posts,
-          verified: false,
-          isPrivate: false,
-          followsCount: randomInt(100, 500),
-          externalUrl: 'https://example.com'
-        };
-      }
-
-      btn.addEventListener('click', () => {
-        const sample = generateSampleProfile();
-        currentProfile = sample;
-        currentResults = sample;
-        showResults(sample, sample.username);
-        showToast('✅ تم تحميل مثال الخريطة', 'success');
-      });
-    })();
-  // Render charts
   setTimeout(() => {
-    renderTrendChart(posts, followers, 'all');
-    renderHeatmap(heatmapData);
-    if (d.platform === 'facebook') {
-      loadAds(d.username, d.fullName, d.pageId || '');
-    } else {
-      const adsSection = document.getElementById('adsSection');
-      if (adsSection) {
-        adsSection.innerHTML = `<div class="card"><div class="card-title">📢 إعلانات Meta</div><div class="saved-empty">هذه الميزة متاحة فقط لصفحات Facebook.</div></div>`;
-      }
+    if (posts.length > 0) {
+      setupInfiniteScroll(posts, followers);
+      initPostFiltersWithInfinite(posts, followers);
+      renderTrendChart(posts, followers, 'all');
+      renderHeatmap(heatmapData);
     }
+    if (d.platform === 'facebook') loadAds(d.username, d.fullName, d.pageId || '');
     initChartTabs(posts, followers);
   }, 100);
-  
-  // تأخير أطول لتهيئة المرشحات
-  setTimeout(() => {
-    initPostFilters(posts, followers);
-  }, 300);
 }
 
 function postCard(p, badge, followers, rank) {
@@ -2774,7 +2787,6 @@ function postCard(p, badge, followers, rank) {
 
   const r = estimateReach(p, followers);
   const rl = reachLabel(r);
-  
   const totalEngagement = (p.likesCount||0) + (p.commentsCount||0) + (p.sharesCount||0);
   const engagementPercent = followers > 0 ? ((totalEngagement / followers) * 100).toFixed(1) : '0';
 
@@ -2784,7 +2796,7 @@ function postCard(p, badge, followers, rank) {
     var t = setTimeout(function(){ window.open(url,'_blank'); }, 1500);
     window.location = igApp;
     window.addEventListener('blur', function(){ clearTimeout(t); }, {once:true});
-  })('${(p.url||'').replace(/'/g, "\\'")}')`;;
+  })('${(p.url||'').replace(/'/g, "\\'")}')`;
 
   return `<div class="post" data-type="${isVideo?'video':isCarousel?'carousel':'photo'}" data-eng="${totalEngagement}" onclick="${onclick}">
     ${rank ? `<div class="post-rank">#${rank}</div>` : ''}
@@ -2926,50 +2938,15 @@ function initChartTabs(posts, followers) {
   });
 }
 
-function initPostFilters(posts, followers) {
-  document.querySelectorAll('.filter-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-      chip.classList.add('active');
-      const f = chip.dataset.filter;
-      let filtered = posts;
-      if (f === 'video') filtered = posts.filter(p => p.videoViewCount > 0 || p.type === 'video');
-      else if (f === 'photo') filtered = posts.filter(p => !p.videoViewCount && p.type !== 'video' && p.type !== 'carousel');
-      else if (f === 'carousel') filtered = posts.filter(p => p.type === 'carousel' || p.type === 'sidecar');
-      else if (f === 'top') filtered = [...posts].sort((a,b) => ((b.likesCount||0)+(b.commentsCount||0)) - ((a.likesCount||0)+(a.commentsCount||0)));
-      
-      const grid = document.getElementById('postsGrid');
-      if (!grid) return;
-      grid.innerHTML = filtered.slice(0, 12).map((p,i) => postCard(p, null, followers, i+1)).join('');
-      
-      const container = grid.parentElement;
-      let btn = document.getElementById('loadMoreFilterBtn');
-      if (btn) btn.remove();
-      
-      if (filtered.length > 12) {
-        const newBtn = document.createElement('button');
-        newBtn.id = 'loadMoreFilterBtn';
-        newBtn.className = 'analyze-btn';
-        newBtn.style.cssText = 'margin-top:20px;width:100%;background:linear-gradient(135deg,var(--accent),var(--accent-2));cursor:pointer;padding:14px';
-        newBtn.innerHTML = `📥 عرض المزيد (${filtered.length - 12} متبقي)`;
-        newBtn.onclick = () => showMoreFilteredPosts(f, filtered);
-        container.appendChild(newBtn);
-      }
-    });
-  });
-}
-
 function renderHeatmap(heatmapData) {
   const el = document.getElementById('heatmap');
   if (!el) return;
   const days = ['أحد', 'إثن', 'ثلا', 'أرب', 'خمي', 'جمع', 'سبت'];
-  // Use avgRate for better normalization and sort display
   const avg = heatmapData.avgRate || heatmapData.heatmap;
   let maxRate = 0;
   for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) maxRate = Math.max(maxRate, avg[d][h] || 0);
   if (maxRate === 0) maxRate = 1;
 
-  // Build grid: header row (hours) then seven rows (days)
   let html = '<div class="heatmap-grid">';
   html += '<div class="heatmap-row heatmap-row-header"><div class="heatmap-label-empty"></div>';
   for (let h = 0; h < 24; h++) {
@@ -3004,7 +2981,7 @@ function renderHeatmap(heatmapData) {
       const rate = avg[d][h] || 0;
       const score = c > 0 ? rate * 0.8 + Math.log10(c + 1) * 0.02 : 0;
       const intensity = Math.min(1, score / maxScore);
-      const hue = 50 - Math.round(intensity * 50); // yellow to red
+      const hue = 50 - Math.round(intensity * 50);
       const lightness = 92 - Math.round(intensity * 35);
       const color = c === 0 ? 'rgba(229, 231, 235, 0.35)' : `hsl(${hue}, 92%, ${lightness}%)`;
       const textColor = intensity > 0.35 ? '#08172b' : '#08172b';
@@ -3018,7 +2995,6 @@ function renderHeatmap(heatmapData) {
   }
   html += '</div>';
 
-  // Legend
   html += `
     <div class="heatmap-legend-outer">
       <div class="heatmap-legend-title">قوة التفاعل من الأصفر الفاتح إلى الأحمر القوي</div>
@@ -3162,7 +3138,6 @@ async function savePage(data, handle) {
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   };
 
-  // LocalStorage
   const local = JSON.parse(localStorage.getItem('saved_pages') || '[]');
   const idx = local.findIndex(p => p.handle === handle);
   if (idx >= 0) {
@@ -3361,77 +3336,6 @@ async function loadSaved(handle) {
 
 window.loadSaved = loadSaved;
 
-function showMorePosts() {
-  if (!currentProfile) return;
-  const posts = currentProfile.latestPosts || currentProfile.posts || [];
-  displayedPostsCount = Math.min(displayedPostsCount + 24, posts.length);
-  const postsGrid = document.getElementById('postsGrid');
-  const followers = currentProfile.followersCount || 0;
-  postsGrid.innerHTML = posts.slice(0, displayedPostsCount).map((p, i) => postCard(p, null, followers, i+1)).join('');
-  const btn = document.getElementById('loadMoreBtn');
-  if (btn) {
-    if (displayedPostsCount >= posts.length) {
-      btn.style.display = 'none';
-    } else {
-      btn.innerHTML = `📥 عرض المزيد (${posts.length - displayedPostsCount} متبقي)`;
-    }
-  }
-}
-
-function showMoreFilteredPosts(filter, filtered) {
-  const followers = currentProfile.followersCount || 0;
-  let currentCount = parseInt(document.getElementById('postsGrid').children.length) || 12;
-  currentCount = Math.min(currentCount + 12, filtered.length);
-  document.getElementById('postsGrid').innerHTML = filtered.slice(0, currentCount).map((p,i) => postCard(p, null, followers, i+1)).join('');
-  
-  if (currentCount >= filtered.length) {
-    const btn = document.getElementById('loadMoreFilterBtn');
-    if (btn) btn.style.display = 'none';
-  } else {
-    const btn = document.getElementById('loadMoreFilterBtn');
-    if (btn) btn.innerHTML = `📥 عرض المزيد (${filtered.length - currentCount} متبقي)`;
-  }
-}
-
-function showAllRemainingPosts() {
-  if (!currentProfile) return;
-  const posts = currentProfile.latestPosts || currentProfile.posts || [];
-  const postsGrid = document.getElementById('postsGrid');
-  const followers = currentProfile.followersCount || 0;
-  
-  // عرض تدريجي من 12 إلى 500
-  let remaining = posts.length;
-  let batches = Math.ceil(remaining / 12);
-  let currentBatch = Math.ceil(displayedPostsCount / 12);
-  
-  if (currentBatch >= batches) {
-    // عرض الكل
-    postsGrid.innerHTML = posts.map((p, i) => postCard(p, null, followers, i+1)).join('');
-    const btn = document.getElementById('loadMoreBtn');
-    if (btn) btn.parentElement.style.display = 'none';
-  } else {
-    // عرض المزيد تدريجياً - أضف 12 في كل مرة
-    displayedPostsCount = Math.min(displayedPostsCount + 24, posts.length);
-    postsGrid.innerHTML = posts.slice(0, displayedPostsCount).map((p, i) => postCard(p, null, followers, i+1)).join('');
-    const btn = document.getElementById('loadMoreBtn');
-    if (btn) {
-      btn.innerHTML = `📥 عرض المزيد (${posts.length - displayedPostsCount} متبقي)`;
-      if (displayedPostsCount >= posts.length) {
-        btn.parentElement.style.display = 'none';
-      }
-    }
-    const allBtn = document.getElementById('loadAllBtn');
-    if (allBtn && displayedPostsCount >= posts.length) {
-      allBtn.style.display = 'none';
-    }
-  }
-}
-
-window.showMorePosts = showMorePosts;
-window.showMoreFilteredPosts = showMoreFilteredPosts;
-window.showAllRemainingPosts = showAllRemainingPosts;
-
-
 async function refreshPage(handle) {
   const btn = document.getElementById('refresh-' + handle);
   if (btn) btn.classList.add('spinning');
@@ -3442,7 +3346,6 @@ async function refreshPage(handle) {
     if (doc.exists) platform = doc.data().platform || 'instagram';
   } catch (e) {}
 
-  // Switch to search tab
   document.querySelector('.tab[data-tab="search"]').click();
   document.querySelector(`[data-platform="${platform}"]`).click();
   document.getElementById('urlInput').value = 'https://www.instagram.com/' + handle + '/';
@@ -3612,6 +3515,7 @@ if ('serviceWorker' in navigator) {
 
 // ==================== RESET ====================
 function resetSearch() {
+  resetInfiniteScroll();
   document.getElementById('resultsBox').innerHTML = '';
   document.getElementById('urlInput').value = '';
   document.getElementById('inputClear').classList.remove('show');
@@ -3621,6 +3525,9 @@ function resetSearch() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 window.resetSearch = resetSearch;
+
+// Initial check
+checkToken();
 
 </script>
 </body>
